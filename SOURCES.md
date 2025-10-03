@@ -1,5 +1,5 @@
 
-- ftp://ftp.figlet.org
+- ftp.figlet.org
 - https://github.com/PhMajerus/FIGfonts
 - https://github.com/xero/figlet-fonts.git
 - https://github.com/phracker/figlet-fonts
