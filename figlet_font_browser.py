@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import inspect
 import shutil
 import sys
 from dataclasses import dataclass
@@ -42,6 +43,22 @@ from textual.containers import Horizontal, Vertical
 
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, RichLog
 from rich.text import Text
+
+
+_TEXT_FROM_ANSI_KWARGS: dict[str, object] = {}
+_TEXT_FROM_ANSI_END: str | None = None
+
+try:
+  _sig = inspect.signature(Text.from_ansi)
+  if "strip" in _sig.parameters:
+    _TEXT_FROM_ANSI_KWARGS["strip"] = False
+  if "end" in _sig.parameters:
+    _TEXT_FROM_ANSI_KWARGS["end"] = ""
+    _TEXT_FROM_ANSI_END = ""
+  else:
+    _TEXT_FROM_ANSI_END = None
+except (ValueError, TypeError):
+  _TEXT_FROM_ANSI_END = None
 
 FIGLET_DEFAULT = shutil.which("figlet") or "/usr/bin/figlet"
 TOILET_DEFAULT = shutil.which("toilet") or "/usr/bin/toilet"
@@ -376,11 +393,14 @@ class FontBrowserApp(App[None]):
     if self.preview is None:
       return
     if interpret_ansi:
-      text = Text.from_ansi(s, strip=False)
+      text = Text.from_ansi(s, **_TEXT_FROM_ANSI_KWARGS)
+      end_value = _TEXT_FROM_ANSI_END
     else:
       text = Text(s)
+      end_value = ""
     if not s.endswith("\n"):
-      text.append("\n")
+      if not interpret_ansi or end_value == "":
+        text.append("\n")
     self.preview.write(text)
 
 
