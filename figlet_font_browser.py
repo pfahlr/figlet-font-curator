@@ -39,9 +39,11 @@ from typing import List, Optional, Tuple
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, RichLog
 
+from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, RichLog
+from rich.text import Text
 from rich.ansi import AnsiDecoder
+
 
 FIGLET_DEFAULT = shutil.which("figlet") or "/usr/bin/figlet"
 TOILET_DEFAULT = shutil.which("toilet") or "/usr/bin/toilet"
@@ -358,7 +360,8 @@ class FontBrowserApp(App[None]):
     if msg:
       self._append_preview(msg)
 
-  def _append_preview(self, s: str) -> None:
+
+  def _append_preview(self, s: str, *, interpret_ansi: bool = False) -> None:
     if self.preview is None:
       return
     segments = list(self._ansi_decoder.decode(s))
@@ -366,6 +369,7 @@ class FontBrowserApp(App[None]):
       return
     for segment in segments:
       self.preview.write(segment)
+
 
   def _next_output_path(
     self,
@@ -427,7 +431,7 @@ class FontBrowserApp(App[None]):
       header = f"{'='*78}\n{fe.path}\n{'-'*78}\n"
       self._append_preview(header)
       if code == 0:
-        self._append_preview(out)
+        self._append_preview(out, interpret_ansi=True)
         body = out
       else:
         err_text = "[ERROR]\n" + out + "\n" + err
