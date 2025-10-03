@@ -1,0 +1,102 @@
+#!/bin/zsh
+# $1 = fonts directory $2 = string to process (in quotes if contains whitespace) $3 = max output width
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+FIGLETCMD="/usr/bin/figlet"
+
+function print_help {
+  echo "usage: "
+  echo 'figlet_gallery.sh <options> "<text to format>"' 
+  echo "options:"
+  echo "  --font-dir: the subdirectory of the project root containing the figlet font flf/tlf files (default: font_collection/ftp.figlet.org/contributed)"
+  echo "  --abs-font-dir: a directory anywhere in the filesystem containing figlet font files, overrides --font-dir when set"
+  echo "  --width: the maximum display width of the output (default:80)"
+  echo "  --figlet-cmd: the figlet command to use (default: $FIGLETCMD)"
+  echo "  --out-file: a file to store the output (opens append mode)"
+  echo "  --out-file-prefix: a base file path to store the output (resulting files will be <out-file-prefix><n>.asc"
+}
+
+if [ $# -lt 1 ]; then
+  echo "you must, at the very least, supply some text to format for this script to function. See usage info below:"
+  print_help;
+  exit 1
+fi
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+	--help)
+            print_help;
+            exit 0
+            ;;
+        --font-dir)
+            fontdir="$2"
+            shift 2
+            ;;
+        --abs-font-dir)
+            absfontdir="$2"
+            shift 2
+            ;;
+        --width)
+            width="$2"
+            shift 2
+            ;;
+        --figlet-cmd)
+            figcmd="$2"
+            shift 2
+            ;;
+        --out-file-prefix)
+            out_to_files_prefix="$2"
+            shift 2
+            ;;
+        --out-file)
+            out_to_file="$2"
+            shift 2
+            ;;
+        *)
+            # Handle positional arguments or unknown options
+            text=$1
+            shift 1
+            ;;
+    esac
+done
+
+if [ ! -n "$width" ]; then
+  width="80"
+fi
+
+if [ -n "$figcmd" ]; then
+  FIGLETCMD="$figcmd"
+fi
+
+if [ -n "$fontdir" ]; then
+  font_directory="$SCRIPT_DIR/$fontdir/"
+else
+  font_directory="$SCRIPT_DIR/font_collection/ftp.figlet.org/contributed/"
+fi
+
+if [ -n "$absfontdir" ]; then
+  font_directory="$absfontdir"
+fi
+
+counter=0
+
+for filepath in "$font_directory"*.flf; do
+  filename=$(basename "$filepath")
+  fontname="${filename%.*}"
+
+  if [ -n "$out_file_prefix" ]; then
+    $FIGLETCMD -d $font_directory -w $width  -f $fontname $text > $out_file_prefix$counter.asc
+  elif [ -n "$out_file" ]; then
+    $FIGLETCMD -d $font_directory -w $width  -f $fontname $text >> $out_file
+  else
+    echo "=============================================================================="
+    echo $FIGLETCMD  -d $font_directory -w $width  -f $fontname $text
+    echo "------------------------------------------------------------------------------"
+    $FIGLETCMD  -d $font_directory -w $width  -f $fontname $text
+    echo "------------------------------------------------------------------------------"
+  fi
+  ((counter++))
+done
+
+
+
+
