@@ -209,7 +209,7 @@ class FontBrowserApp(App[None]):
     if not self.config.out_dir:
       self.bell(); self.toast("No --out-dir provided."); return
     cur = self._current_font()
-    if not cur or self.preview is None:
+    if cur is None or self.preview is None:
       return
     out = self._next_output_path()
     out.write_text(self.last_render or "")
