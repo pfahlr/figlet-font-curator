@@ -39,7 +39,9 @@ from typing import List, Optional, Tuple
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Log
+from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, RichLog
+
+from rich.ansi import AnsiDecoder
 
 FIGLET_DEFAULT = shutil.which("figlet") or "/usr/bin/figlet"
 TOILET_DEFAULT = shutil.which("toilet") or "/usr/bin/toilet"
@@ -153,8 +155,9 @@ class FontBrowserApp(App[None]):
     self._width_mode: bool = False
 
     self.font_list: ListView | None = None
-    self.preview: Log | None = None
+    self.preview: RichLog | None = None
     self.search_input: Input | None = None
+    self._ansi_decoder = AnsiDecoder()
 
   def compose(self) -> ComposeResult:
     yield Header(show_clock=False)
@@ -165,14 +168,14 @@ class FontBrowserApp(App[None]):
         yield self.font_list
       with Vertical(id="right"):
         yield Label(self._status_text(), id="status")
-        self.preview = Log(id="preview")
+        self.preview = RichLog(id="preview")
         yield self.preview
     yield Footer()
 
   def on_mount(self) -> None:
     self.search_input = self.query_one("#search", Input)
     self.font_list = self.query_one("#font-list", ListView)
-    self.preview = self.query_one("#preview", Log)
+    self.preview = self.query_one("#preview", RichLog)
 
     self._rescan()
 
@@ -353,13 +356,16 @@ class FontBrowserApp(App[None]):
       return
     self.preview.clear()
     if msg:
-      self.preview.write_line(msg)
+      self._append_preview(msg)
 
   def _append_preview(self, s: str) -> None:
     if self.preview is None:
       return
-    for line in s.splitlines():
-      self.preview.write_line(line)
+    segments = list(self._ansi_decoder.decode(s))
+    if not segments:
+      return
+    for segment in segments:
+      self.preview.write(segment)
 
   def _next_output_path(
     self,
