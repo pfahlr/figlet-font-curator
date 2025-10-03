@@ -44,7 +44,6 @@ from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Ri
 from rich.text import Text
 from rich.ansi import AnsiDecoder
 
-
 FIGLET_DEFAULT = shutil.which("figlet") or "/usr/bin/figlet"
 TOILET_DEFAULT = shutil.which("toilet") or "/usr/bin/toilet"
 
@@ -170,7 +169,7 @@ class FontBrowserApp(App[None]):
         yield self.font_list
       with Vertical(id="right"):
         yield Label(self._status_text(), id="status")
-        self.preview = RichLog(id="preview")
+        self.preview = RichLog(id="preview", wrap=False)
         yield self.preview
     yield Footer()
 
@@ -360,15 +359,21 @@ class FontBrowserApp(App[None]):
     if msg:
       self._append_preview(msg)
 
-
   def _append_preview(self, s: str, *, interpret_ansi: bool = False) -> None:
     if self.preview is None:
       return
+    self.preview.write(self._to_rich_text(s))
     segments = list(self._ansi_decoder.decode(s))
     if not segments:
       return
     for segment in segments:
       self.preview.write(segment)
+
+  def _to_rich_text(self, content: str) -> Text:
+    text = Text.from_ansi(content, strip=False)
+    if not content.endswith("\n"):
+      text.append("\n")
+    return text
 
 
   def _next_output_path(
