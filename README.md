@@ -30,6 +30,8 @@
 Copy FIGlet fonts (`.flf`, `.tlf`) from an input directory to an output directory with:
 
 - **Content-based de-duplication** across the entire `--out` tree (recursive).
+- Optional **rendered-output de-duplication** (`--compare-output`) that hashes the FIGlet output for a sample string (requires the
+  `figlet` CLI) so visually identical fonts are treated as duplicates.
 - **Versioned renaming** for same-name / different-content files (`_v02`, `_v03`, …).
 - Optional **recursive** scanning of `--in`.
 - Optional **outsub** routing (`--outsub`) to group this run’s copies into a subfolder.
@@ -50,4 +52,10 @@ pip install rich xxhash
 
 # 3) run
 python figlet_font_curator.py --in ./fonts_in --out ./fonts_out
+
+```
+
+> **Tip:** To de-duplicate based on rendered FIGlet output, install the `figlet` CLI (for example, `apt-get install figlet` on
+> Debian/Ubuntu) and add `--compare-output` when running the curator. The tool will render the sample string `FIGLET FONT CURATOR`
+> with each font to detect visually identical results.
 

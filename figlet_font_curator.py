@@ -20,6 +20,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -41,6 +42,7 @@ except ImportError as e:
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 LOG_BASENAME_PREFIX = "figlet_import"
 ALLOWED_EXTS = {".flf", ".tlf", ".flc"}  # Supported font extensions
+DEFAULT_COMPARE_TEXT = "FIGLET FONT CURATOR"
 
 console = Console()
 logger = logging.getLogger("figlet_importer")
@@ -83,6 +85,45 @@ def xxhash_file(path: Path) -> str:
       h.update(chunk)
   return h.hexdigest()
 
+
+def figlet_output_hash(font_path: Path, sample_text: str) -> str:
+  """Return a hash of the FIGlet output for the given font file."""
+  font_dir = font_path.parent
+  font_name = font_path.name
+  cmd = [
+    "figlet",
+    "-d",
+    str(font_dir),
+    "-f",
+    font_name,
+    sample_text,
+  ]
+  try:
+    result = subprocess.run(
+      cmd,
+      check=False,
+      capture_output=True,
+      text=True,
+    )
+  except FileNotFoundError as exc:
+    raise RuntimeError("`figlet` executable not found on PATH.") from exc
+
+  if result.returncode != 0:
+    stderr = result.stderr.strip()
+    error = stderr or f"exit code {result.returncode}"
+    raise RuntimeError(f"figlet failed for {font_path}: {error}")
+
+  output = result.stdout.replace("\r\n", "\n")
+  h = xxhash.xxh64()
+  h.update(output.encode("utf-8", errors="replace"))
+  return h.hexdigest()
+
+
+def compute_font_fingerprint(path: Path, compare_output: bool, sample_text: str) -> str:
+  if compare_output:
+    return figlet_output_hash(path, sample_text)
+  return xxhash_file(path)
+
 def next_versioned_name(dest_dir: Path, stem: str, ext: str) -> str:
   n = 2
   while True:
@@ -119,9 +160,15 @@ def write_jsonl(logfile: Path, record: dict) -> None:
   with logfile.open("a", encoding="utf-8") as f:
     f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-def index_existing(out_dir: Path, progress: Progress, task: TaskID) -> Dict[str, Path]:
+def index_existing(
+  out_dir: Path,
+  progress: Progress,
+  task: TaskID,
+  compare_output: bool,
+  sample_text: str,
+) -> Dict[str, Path]:
   """
-  Index existing output fonts by content hash (recursive across the entire --out).
+  Index existing output fonts by fingerprint (content hash or rendered FIGlet output).
   """
   existing_hash_to_path: Dict[str, Path] = {}
   existing_files = list(iter_font_files(out_dir, recursive=True))
@@ -129,10 +176,10 @@ def index_existing(out_dir: Path, progress: Progress, task: TaskID) -> Dict[str,
 
   for p in existing_files:
     try:
-      h = xxhash_file(p)
+      h = compute_font_fingerprint(p, compare_output, sample_text)
       existing_hash_to_path.setdefault(h, p)
     except Exception as e:
-      logger.info(f"[yellow]WARN[/]: failed to hash existing: {p.name} ({e})")
+      logger.info(f"[yellow]WARN[/]: failed to fingerprint existing: {p.name} ({e})")
     finally:
       progress.advance(task, 1)
 
@@ -148,6 +195,8 @@ def process_inputs(
   logfile: Path,
   progress: Progress,
   task: TaskID,
+  compare_output: bool,
+  sample_text: str,
 ) -> Tuple[int, int, int]:
   """
   Copy inputs into out_target_dir (or its subdirs if maintain_structure_effective).
@@ -169,18 +218,18 @@ def process_inputs(
     else:
       dest_base_dir = out_target_dir
 
-    # Hash input
+    # Hash input or compare output
     try:
-      src_hash = xxhash_file(src)
+      src_hash = compute_font_fingerprint(src, compare_output, sample_text)
     except Exception as e:
       event = {
         "ts": now_iso(),
         "input": str(src),
-        "action": "ERROR_HASH",
+        "action": "ERROR_FINGERPRINT",
         "error": str(e),
       }
       write_jsonl(logfile, event)
-      logger.info(f"[red]ERROR[/]: cannot hash {src.name}: {e}")
+      logger.info(f"[red]ERROR[/]: cannot fingerprint {src.name}: {e}")
       progress.advance(task, 1)
       continue
 
@@ -188,22 +237,26 @@ def process_inputs(
       dest_base_dir, src.name, src_hash, existing_hash_to_path
     )
 
+    fingerprint_method = "figlet_output" if compare_output else "xxh64"
     event = {
       "ts": now_iso(),
       "input": str(src),
-      "input_hash": f"xxh64:{src_hash}",
+      "input_hash": f"{fingerprint_method}:{src_hash}",
       "out_dir": str(out_dir),
       "out_target_dir": str(out_target_dir),
       "dest_base_dir": str(dest_base_dir),
       "maintain_structure_effective": maintain_structure_effective,
       "existing_same_name": name_conflict,
       "existing_same_content": content_duplicate,
+      "compare_output": compare_output,
       "action": action,
     }
+    if compare_output:
+      event["compare_sample_text"] = sample_text
 
     if action == "SKIP_DUPLICATE":
       skipped += 1
-      event["reason"] = "duplicate-content"
+      event["reason"] = "duplicate-output" if compare_output else "duplicate-content"
       write_jsonl(logfile, event)
       logger.info(f"[yellow]SKIP (dup)[/]: {src.name}")
       progress.advance(task, 1)
@@ -247,10 +300,25 @@ def main() -> None:
   parser.add_argument("--outsub", dest="out_sub", help="Subdirectory under --out to place files from this run (comparisons still index entire --out).")
   parser.add_argument("--maintain-structure", action="store_true",
                       help="When used with --outsub and --recursive, preserve the input's subdirectory structure under --out/<outsub>/")
+  parser.add_argument(
+    "--compare-output",
+    action="store_true",
+    help=(
+      "Compare fonts by the FIGlet output they produce for a sample string "
+      "instead of by raw file content (requires the `figlet` CLI)."
+    ),
+  )
   args = parser.parse_args()
 
   in_dir = Path(args.in_dir).expanduser().resolve()
   out_dir = Path(args.out_dir).expanduser().resolve()
+
+  compare_output = bool(args.compare_output)
+  sample_text = DEFAULT_COMPARE_TEXT
+
+  if compare_output and shutil.which("figlet") is None:
+    console.print("[red]ERROR[/] --compare-output requires the `figlet` executable to be installed and on PATH.")
+    sys.exit(2)
 
   if not in_dir.is_dir():
     console.print(f"[red]ERROR[/] --in directory does not exist or is not a directory: {in_dir}")
@@ -283,9 +351,11 @@ def main() -> None:
   logger.info(
     f"Starting import  •  in=[bold]{in_dir}[/]  out=[bold]{out_dir}[/]  "
     f"outsub=[bold]{args.out_sub or '(none)'}[/]  recursive=[bold]{args.recursive}[/]  "
-    f"maintain_structure=[bold]{maintain_structure_effective}[/]"
+    f"maintain_structure=[bold]{maintain_structure_effective}[/]  compare_output=[bold]{compare_output}[/]"
   )
   logger.info(f"JSONL log: [italic]{logfile}[/]")
+  if compare_output:
+    logger.info(f"FIGlet comparison sample text: [italic]{sample_text}[/]")
 
   # Gather input files (optionally recursive), skipping anything under --out if nested
   in_files = sorted(
@@ -305,12 +375,12 @@ def main() -> None:
     transient=False,
   ) as progress:
     t_index = progress.add_task("Indexing existing output fonts", total=0)
-    existing_hash_to_path = index_existing(out_dir, progress, t_index)
+    existing_hash_to_path = index_existing(out_dir, progress, t_index, compare_output, sample_text)
 
     t_process = progress.add_task("Processing input fonts", total=0)
     copied, renamed, skipped = process_inputs(
       in_dir, in_files, out_dir, out_target_dir, maintain_structure_effective,
-      existing_hash_to_path, logfile, progress, t_process
+      existing_hash_to_path, logfile, progress, t_process, compare_output, sample_text
     )
 
   # Summary
