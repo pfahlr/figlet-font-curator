@@ -74,17 +74,21 @@ class FontEntry:
 # Utility functions
 # -------------------------
 
+ALLOWED_EXTS = {
+  ".flf": "flf",
+  ".tlf": "tlf",
+}
+
+
 def scan_fonts(base: Path) -> List[FontEntry]:
   fonts: List[FontEntry] = []
-
   for p in base.rglob("*"):
     if not p.is_file():
       continue
-    suffix = p.suffix.lower()
-    if suffix == ".flf":
-      fonts.append(FontEntry(p, "flf"))
-    elif suffix == ".tlf":
-      fonts.append(FontEntry(p, "tlf"))
+    kind = ALLOWED_EXTS.get(p.suffix.lower())
+    if kind is None:
+      continue
+    fonts.append(FontEntry(p, kind))
 
   fonts.sort(key=lambda f: str(f.path).lower())
   return fonts
