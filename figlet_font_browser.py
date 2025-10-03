@@ -121,7 +121,7 @@ class FontBrowserApp(App[None]):
   #right Vertical { width: 56%; min-width: 40; border: solid $surface; }
   #search Input { margin: 1 1; }
   #font-list ListView { height: 1fr; }
-  #preview TextLog { height: 1fr; padding: 1 1; }
+  #preview Log { height: 1fr; padding: 1 1; }
   """
 
   BINDINGS = [
@@ -142,10 +142,7 @@ class FontBrowserApp(App[None]):
     self.filtered_fonts: List[FontEntry] = []
     self.counter: int = 0
     self.last_render: str = ""
-
-    self.font_list: ListView | None = None
-    self.preview: Log | None = None
-    self.search_input: Input | None = None
+    self._width_mode: bool = False
 
     self.font_list: ListView | None = None
     self.preview: Log | None = None
@@ -167,7 +164,7 @@ class FontBrowserApp(App[None]):
   def on_mount(self) -> None:
     self.search_input = self.query_one("#search", Input)
     self.font_list = self.query_one("#font-list", ListView)
-    self.preview = self.query_one("#preview", TextLog)
+    self.preview = self.query_one("#preview", Log)
 
     self._rescan()
 
@@ -180,7 +177,10 @@ class FontBrowserApp(App[None]):
   # ----- Status helpers -----
   def _status_text(self) -> str:
     flc = str(self.config.flc) if self.config.flc else "<none>"
-    return f"Text: {self.config.text!r}  |  Width: {self.config.width}  |  .flc: {flc}  |  Out: {self.config.out_dir or '<none>'}"
+    return (
+      f"Text: {self.config.text!r}  |  Width: {self.config.width}  |  .flc: {flc}  |  "
+      f"Out: {self.config.out_dir or '<none>'}"
+    )
 
   def _refresh_status(self) -> None:
     self.query_one("#status", Label).update(self._status_text())
@@ -190,12 +190,15 @@ class FontBrowserApp(App[None]):
     self.exit()
 
   def action_focus_search(self) -> None:
+    self._width_mode = False
+    self.search_input.placeholder = "Filter fonts (substring)"
     self.search_input.focus()
 
   def action_change_width(self) -> None:
     # Reuse search input as a simple width prompt
     self.search_input.placeholder = f"Width (current {self.config.width}) — type number and press Enter"
     self.search_input.value = ""
+    self._width_mode = True
     self.search_input.focus()
 
   def action_save_current(self) -> None:
@@ -204,9 +207,7 @@ class FontBrowserApp(App[None]):
     cur = self._current_font()
     if not cur or not self.preview:
       return
-    self.config.out_dir.mkdir(parents=True, exist_ok=True)
-    out = self.config.out_dir / f"{self.config.out_prefix}{self.counter}.asc"
-    self.counter += 1
+    out = self._next_output_path()
     out.write_text(self.last_render or "")
     self.toast(f"Saved {out}")
 
@@ -214,28 +215,48 @@ class FontBrowserApp(App[None]):
     if not self.config.out_dir:
       self.bell(); self.toast("No --out-dir provided."); return
 
+    fonts = list(self.filtered_fonts)
+    if not fonts:
+      self.toast("No fonts to save.")
+      return
+
     async def worker() -> None:
-      self._clear_preview("Rendering…")
-      code, out, err = await run_figlet(
-        self.config.text,
-        self.config.width,
-        fe,
-        self.config.flc,
-        self.config.use_toilet,
-      )
-      self.preview.clear()
-      header = ("="*78) + "\n" + str(fe.path) + "\n" + ("-"*78) + "\n"
-      self._append_preview(header)
-      if code == 0:
-        self._append_preview(out)
-        body = out
-      else:
-        err_text = "[ERROR]\n" + out + "\n" + err
-        self._append_preview(err_text)
-        body = err_text
-      footer = "\n" + "-"*78
-      self._append_preview(footer)
-      self.last_render = header + body + footer
+      assert self.preview is not None
+      self._clear_preview("Saving all fonts…")
+      saved = 0
+      failures: list[FontEntry] = []
+      name_counts: dict[str, int] = {}
+
+      for fe in fonts:
+        code, out, err = await run_figlet(
+          self.config.text,
+          self.config.width,
+          fe,
+          self.config.flc,
+          self.config.use_toilet,
+        )
+
+        header = f"{'='*78}\n{fe.path}\n{'-'*78}\n"
+        if code == 0:
+          body = out
+        else:
+          body = "[ERROR]\n" + out + "\n" + err
+          failures.append(fe)
+        footer = "\n" + "-"*78
+        rendered = header + body + footer
+        self.last_render = rendered
+
+        base = self._sanitise_name(fe)
+        out_path = self._next_output_path(base, name_counts)
+        out_path.write_text(rendered)
+        saved += 1
+        self._append_preview(f"Saved {out_path}")
+
+      if failures:
+        self._append_preview("\nErrors encountered:")
+        for fe in failures:
+          self._append_preview(f"- {fe.path}: see saved file for details")
+      self.toast(f"Saved {saved} fonts to {self.config.out_dir}")
 
     self.run_worker(worker())
 
@@ -252,20 +273,28 @@ class FontBrowserApp(App[None]):
 
   # ----- Input & list handlers -----
   def on_input_submitted(self, event: Input.Submitted) -> None:
-    if event.input.id == "search":
-      self._apply_filter(event.value)
-      event.input.placeholder = "Filter fonts (substring)"
-    else:
-      val = event.value.strip()
-      if val.isdigit():
-        self.config.width = int(val)
-        self._refresh_status()
-        self._render_selected()
+    if event.input.id != "search":
+      return
+    value = event.value.strip()
+    if self._width_mode:
+      if value:
+        try:
+          self.config.width = max(1, int(value))
+          self._refresh_status()
+          self._render_selected()
+        except ValueError:
+          self.bell()
+          self.toast("Width must be an integer")
+      self._width_mode = False
       self.search_input.placeholder = "Filter fonts (substring)"
       self.search_input.value = ""
+      return
+
+    self._apply_filter(value)
+    self.search_input.placeholder = "Filter fonts (substring)"
 
   def on_input_changed(self, event: Input.Changed) -> None:
-    if event.input.id == "search":
+    if event.input.id == "search" and not self._width_mode:
       self._apply_filter(event.value)
 
   def on_list_view_highlighted(self, _event: ListView.Highlighted) -> None:
@@ -283,6 +312,7 @@ class FontBrowserApp(App[None]):
   def _rebuild_list(self) -> None:
     if not self.font_list:
       return
+    prev_index = self.font_list.index or 0
     self.font_list.clear()
     for fe in self.filtered_fonts:
       try:
@@ -291,7 +321,10 @@ class FontBrowserApp(App[None]):
         rel = fe.path
       self.font_list.append(ListItem(Label(str(rel))))
     if self.filtered_fonts:
-      self.font_list.index = min(self.font_list.index or 0, len(self.filtered_fonts) - 1)
+      self.font_list.index = min(prev_index, len(self.filtered_fonts) - 1)
+      self.call_after_refresh(self._render_selected)
+    else:
+      self._clear_preview("No font selected.")
 
   def _rescan(self) -> None:
     self.all_fonts = scan_fonts(self.config.font_dir)
@@ -319,6 +352,47 @@ class FontBrowserApp(App[None]):
       return
     for line in s.splitlines():
       self.preview.write_line(line)
+
+  def _next_output_path(
+    self,
+    base: Optional[str] = None,
+    counts: Optional[dict[str, int]] = None,
+  ) -> Path:
+    if not self.config.out_dir:
+      raise RuntimeError("Output directory not configured")
+    out_dir = self.config.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if base is None:
+      while True:
+        candidate = out_dir / f"{self.config.out_prefix}{self.counter}.asc"
+        if not candidate.exists():
+          self.counter += 1
+          return candidate
+        self.counter += 1
+
+    if counts is None:
+      counts = {}
+
+    used = counts.get(base, 0)
+    while True:
+      suffix = "" if used == 0 else f"_{used+1:02d}"
+      candidate = out_dir / f"{self.config.out_prefix}{base}{suffix}.asc"
+      if not candidate.exists():
+        counts[base] = used + 1
+        return candidate
+      used += 1
+
+  def _sanitise_name(self, font: FontEntry) -> str:
+    try:
+      rel = font.path.relative_to(self.config.font_dir)
+    except Exception:
+      rel = Path(font.path.name)
+    rel_path = Path(rel)
+    safe = rel_path.with_suffix("").as_posix().replace("/", "__")
+    chars = [c if c.isalnum() or c in {"-", "_"} else "_" for c in safe]
+    cleaned = "".join(chars).strip("_")
+    return cleaned or font.base_name
 
   def _render_selected(self) -> None:
     fe = self._current_font()
