@@ -141,6 +141,35 @@ async def run_figlet(
   return proc.returncode, out_b.decode(errors="replace"), err_b.decode(errors="replace")
 
 
+def _normalise_figlet_output(s: str) -> str:
+  """Normalise figlet/toilet output for display.
+
+  FIGlet fonts often rely on backspace overstriking to achieve shading or bold
+  effects. Rich/Textual will render the control characters literally, which
+  distorts the preview. We apply those control characters ourselves to emulate a
+  classic terminal rendering.
+  """
+
+  if not s:
+    return s
+
+  # Convert CRLF/CR to LF so we only have to deal with a single newline form.
+  s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+  def _apply_backspaces(segment: str) -> str:
+    buf: list[str] = []
+    for ch in segment:
+      if ch == "\b":
+        if buf:
+          buf.pop()
+      else:
+        buf.append(ch)
+    return "".join(buf)
+
+  parts = [_apply_backspaces(part) for part in s.split("\n")]
+  return "\n".join(parts)
+
+
 class FontBrowserApp(App[None]):
   CSS = """
   #root Horizontal { height: 1fr; }
@@ -277,6 +306,8 @@ class FontBrowserApp(App[None]):
           self.config.flc,
           self.config.use_toilet,
         )
+        out = _normalise_figlet_output(out)
+        err = _normalise_figlet_output(err)
 
         header = f"{'='*78}\n{fe.path}\n{'-'*78}\n"
         if code == 0:
@@ -460,6 +491,8 @@ class FontBrowserApp(App[None]):
         self.config.flc,
         self.config.use_toilet,
       )
+      out = _normalise_figlet_output(out)
+      err = _normalise_figlet_output(err)
       self.preview.clear()
       header = f"{'='*78}\n{fe.path}\n{'-'*78}\n"
       self._append_preview(header)
