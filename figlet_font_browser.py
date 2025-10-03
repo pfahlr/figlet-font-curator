@@ -31,9 +31,13 @@ import argparse
 import asyncio
 import locale
 import os
+import hashlib
 import inspect
+import os
 import shutil
 import sys
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -78,8 +82,10 @@ class Config:
 
 @dataclass
 class FontEntry:
-  path: Path  # full path to .flf or .tlf
+  path: Path  # full path to on-disk font to feed figlet/toilet (may be cached extract)
   kind: str   # "flf" or "tlf"
+  source_path: Optional[Path] = None  # original file location (e.g. compressed archive)
+  inner_name: Optional[str] = None    # path inside archive, if applicable
 
   @property
   def font_dir(self) -> Path:
@@ -88,6 +94,13 @@ class FontEntry:
   @property
   def base_name(self) -> str:
     return self.path.stem
+
+  @property
+  def display_path(self) -> Path:
+    if self.source_path is not None and self.inner_name:
+      inner_label = Path(self.inner_name).name
+      return self.source_path.parent / f"{self.source_path.name}::{inner_label}"
+    return self.source_path or self.path
 
 
 # -------------------------
@@ -99,18 +112,70 @@ ALLOWED_EXTS = {
   ".tlf": "tlf",
 }
 
+_CACHE_ROOT = Path(tempfile.gettempdir()) / "figlet_font_browser_cache"
+
+
+def _ensure_cache_dir() -> Path:
+  _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+  return _CACHE_ROOT
+
+
+def _extract_zip_font(path: Path) -> List[FontEntry]:
+  try:
+    with zipfile.ZipFile(path) as zf:
+      infos = [
+        info for info in zf.infolist()
+        if not info.is_dir() and ALLOWED_EXTS.get(Path(info.filename).suffix.lower())
+      ]
+      if not infos:
+        return []
+
+      cache_dir = _ensure_cache_dir()
+      results: List[FontEntry] = []
+      for info in infos:
+        kind = ALLOWED_EXTS.get(Path(info.filename).suffix.lower())
+        if kind is None:
+          continue
+        data = zf.read(info)
+
+        digest = hashlib.sha256()
+        digest.update(str(path.resolve()).encode())
+        digest.update(b"\0")
+        digest.update(info.filename.encode())
+        digest.update(b"\0")
+        digest.update(data)
+        target_dir = cache_dir / digest.hexdigest()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / Path(info.filename).name
+        if not target_path.exists():
+          target_path.write_bytes(data)
+        results.append(FontEntry(target_path, kind, source_path=path, inner_name=info.filename))
+      return results
+  except zipfile.BadZipFile:
+    return []
+
+
+def _probe_font_file(path: Path) -> List[FontEntry]:
+  if zipfile.is_zipfile(path):
+    extracted = _extract_zip_font(path)
+    if extracted:
+      return extracted
+  kind = ALLOWED_EXTS.get(path.suffix.lower())
+  if kind is None:
+    return []
+  return [FontEntry(path, kind)]
+
 
 def scan_fonts(base: Path) -> List[FontEntry]:
   fonts: List[FontEntry] = []
   for p in base.rglob("*"):
     if not p.is_file():
       continue
-    kind = ALLOWED_EXTS.get(p.suffix.lower())
-    if kind is None:
+    if ALLOWED_EXTS.get(p.suffix.lower()) is None:
       continue
-    fonts.append(FontEntry(p, kind))
+    fonts.extend(_probe_font_file(p))
 
-  fonts.sort(key=lambda f: str(f.path).lower())
+  fonts.sort(key=lambda f: str(f.display_path).lower())
   return fonts
 
 
@@ -309,7 +374,7 @@ class FontBrowserApp(App[None]):
           self.config.use_toilet,
         )
 
-        header = f"{'='*78}\n{fe.path}\n{'-'*78}\n"
+        header = f"{'='*78}\n{fe.display_path}\n{'-'*78}\n"
         if code == 0:
           body = out
         else:
@@ -328,7 +393,7 @@ class FontBrowserApp(App[None]):
       if failures:
         self._append_preview("\nErrors encountered:")
         for fe in failures:
-          self._append_preview(f"- {fe.path}: see saved file for details")
+          self._append_preview(f"- {fe.display_path}: see saved file for details")
       self.toast(f"Saved {saved} fonts to {self.config.out_dir}")
 
     self.run_worker(worker())
@@ -379,7 +444,15 @@ class FontBrowserApp(App[None]):
     if not n:
       self.filtered_fonts = list(self.all_fonts)
     else:
-      self.filtered_fonts = [f for f in self.all_fonts if n in str(f.path).lower()]
+      def matches(entry: FontEntry) -> bool:
+        parts = {
+          str(entry.display_path).lower(),
+          str(entry.path).lower(),
+          entry.base_name.lower(),
+        }
+        return any(n in part for part in parts)
+
+      self.filtered_fonts = [f for f in self.all_fonts if matches(f)]
     self._rebuild_list()
 
   def _rebuild_list(self) -> None:
@@ -389,9 +462,9 @@ class FontBrowserApp(App[None]):
     self.font_list.clear()
     for fe in self.filtered_fonts:
       try:
-        rel = fe.path.relative_to(self.config.font_dir)
+        rel = fe.display_path.relative_to(self.config.font_dir)
       except Exception:
-        rel = fe.path
+        rel = fe.display_path
       self.font_list.append(ListItem(Label(str(rel))))
     if self.filtered_fonts:
       self.font_list.index = min(prev_index, len(self.filtered_fonts) - 1)
@@ -467,9 +540,9 @@ class FontBrowserApp(App[None]):
 
   def _sanitise_name(self, font: FontEntry) -> str:
     try:
-      rel = font.path.relative_to(self.config.font_dir)
+      rel = font.display_path.relative_to(self.config.font_dir)
     except Exception:
-      rel = Path(font.path.name)
+      rel = Path(font.display_path.name)
     rel_path = Path(rel)
     safe = rel_path.with_suffix("").as_posix().replace("/", "__")
     chars = [c if c.isalnum() or c in {"-", "_"} else "_" for c in safe]
@@ -492,7 +565,7 @@ class FontBrowserApp(App[None]):
         self.config.use_toilet,
       )
       self.preview.clear()
-      header = f"{'='*78}\n{fe.path}\n{'-'*78}\n"
+      header = f"{'='*78}\n{fe.display_path}\n{'-'*78}\n"
       self._append_preview(header)
       if code == 0:
         self._append_preview(out, interpret_ansi=True)
