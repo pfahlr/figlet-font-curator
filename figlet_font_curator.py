@@ -2,17 +2,17 @@
 """
 figlet_font_importer_rich.py
 
-Copy FIGlet fonts (.flf, .tlf) from --in to --out with:
+Copy FIGlet fonts (.flf, .tlf, .flc) from --in to --out with:
 - Content-based de-duplication across the entire --out (recursive)
 - Versioning on same-name/different-content (_v02, _v03, ...)
 - Optional recursive scan of --in (-r/--recursive)
 - Optional --outsub to place this run's copies under a subfolder of --out
-- Optional --maintain-structure (effective only with --outsub + --recursive) to preserve input subdirectory layout under --out/<outsub>/
+- Optional --maintain-structure (requires --outsub + --recursive) to preserve input subdirectory layout
 - Rich progress bars & pretty console logs
 - JSONL audit log
 
 Usage:
-  python figlet_font_importer_rich.py --in /path/to/in_fonts --out /path/to/out_fonts [-r] [--outsub source] [--maintain-structure]
+  python figlet_font_importer_rich.py --in /path/to/in_fonts --out /path/to/out_fonts [-r] [--outsub source_name] [--maintain-structure]
 """
 
 import argparse
@@ -40,7 +40,7 @@ except ImportError as e:
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 LOG_BASENAME_PREFIX = "figlet_import"
-ALLOWED_EXTS = {".flf", ".tlf"}  # Supported font extensions
+ALLOWED_EXTS = {".flf", ".tlf", ".flc"}  # Supported font extensions
 
 console = Console()
 logger = logging.getLogger("figlet_importer")
@@ -59,7 +59,7 @@ def _is_allowed_font(path: Path) -> bool:
 
 def iter_font_files(directory: Path, recursive: bool, exclude_subtree: Optional[Path] = None) -> Iterable[Path]:
   """
-  Yield .flf/.tlf files from `directory`.
+  Yield .flf/.tlf/.flc files from `directory`.
   - If `recursive` is True, descends into subdirectories.
   - If `exclude_subtree` is provided, skips any file under that subtree (useful when --out is inside --in).
   """
@@ -161,7 +161,6 @@ def process_inputs(
   for src in in_files:
     # Decide destination base directory
     if maintain_structure_effective:
-      # Preserve the relative parent path under --in
       try:
         rel_parent = src.relative_to(in_dir).parent
       except Exception:
@@ -210,11 +209,12 @@ def process_inputs(
       progress.advance(task, 1)
       continue
 
+    # COPY or COPY_RENAMED
     assert dest is not None
     try:
       dest_base_dir.mkdir(parents=True, exist_ok=True)
       shutil.copy2(src, dest)
-      # Update maps so later inputs (this run) see this content as existing
+      # Update maps so later inputs see this content as existing
       existing_hash_to_path[src_hash] = dest
       event["dest"] = str(dest)
       write_jsonl(logfile, event)
@@ -239,9 +239,9 @@ def main() -> None:
   setup_logging()
 
   parser = argparse.ArgumentParser(
-    description="Import FIGlet fonts (.flf, .tlf) with content-based de-duplication, versioned naming, Rich progress, and JSONL logs."
+    description="Import FIGlet fonts (.flf, .tlf, .flc) with content-based de-duplication, versioned naming, Rich progress, and JSONL logs."
   )
-  parser.add_argument("--in", "-i", dest="in_dir", required=True, help="Input directory containing .flf/.tlf files.")
+  parser.add_argument("--in", "-i", dest="in_dir", required=True, help="Input directory containing font files.")
   parser.add_argument("--out", "-o", dest="out_dir", required=True, help="Output directory to populate with unique fonts.")
   parser.add_argument("-r", "--recursive", action="store_true", help="Scan input directory recursively.")
   parser.add_argument("--outsub", dest="out_sub", help="Subdirectory under --out to place files from this run (comparisons still index entire --out).")
