@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import locale
 import os
 import inspect
 import shutil
@@ -113,6 +114,36 @@ def scan_fonts(base: Path) -> List[FontEntry]:
   return fonts
 
 
+def _decode_output(data: bytes) -> str:
+  """Decode figlet/toilet output while preserving block characters.
+
+  Many FIGlet fonts still rely on the classic codepage 437 glyphs for block
+  drawing characters. Decoding those bytes as UTF-8 (the default on most
+  systems) results in replacement characters which renders the preview as the
+  coloured "mosaic" seen in the bug report. We try UTF-8 first for modern
+  fonts, and then gracefully fall back to CP437 and Latin-1 for legacy fonts,
+  finally defaulting to a replacement-based UTF-8 decode if everything fails.
+  """
+
+  preferred = locale.getpreferredencoding(False)
+  fallbacks = []
+  if preferred:
+    fallbacks.append(preferred)
+  fallbacks.extend(["utf-8", "cp437", "latin-1"])
+
+  seen: set[str] = set()
+  for enc in fallbacks:
+    if enc.lower() in seen:
+      continue
+    seen.add(enc.lower())
+    try:
+      return data.decode(enc)
+    except UnicodeDecodeError:
+      continue
+
+  return data.decode("utf-8", errors="replace")
+
+
 async def run_figlet(
   text: str,
   width: int,
@@ -138,7 +169,7 @@ async def run_figlet(
     stderr=asyncio.subprocess.PIPE,
   )
   out_b, err_b = await proc.communicate()
-  return proc.returncode, out_b.decode(errors="replace"), err_b.decode(errors="replace")
+  return proc.returncode, _decode_output(out_b), _decode_output(err_b)
 
 
 class FontBrowserApp(App[None]):
