@@ -7,11 +7,12 @@ Copy FIGlet fonts (.flf, .tlf) from --in to --out with:
 - Versioning on same-name/different-content (_v02, _v03, ...)
 - Optional recursive scan of --in (-r/--recursive)
 - Optional --outsub to place this run's copies under a subfolder of --out
+- Optional --maintain-structure (effective only with --outsub + --recursive) to preserve input subdirectory layout under --out/<outsub>/
 - Rich progress bars & pretty console logs
 - JSONL audit log
 
 Usage:
-  python figlet_font_importer_rich.py --in /path/to/in_fonts --out /path/to/out_fonts [-r] [--outsub source_name]
+  python figlet_font_importer_rich.py --in /path/to/in_fonts --out /path/to/out_fonts [-r] [--outsub source] [--maintain-structure]
 """
 
 import argparse
@@ -82,22 +83,22 @@ def xxhash_file(path: Path) -> str:
       h.update(chunk)
   return h.hexdigest()
 
-def next_versioned_name(out_target_dir: Path, stem: str, ext: str) -> str:
+def next_versioned_name(dest_dir: Path, stem: str, ext: str) -> str:
   n = 2
   while True:
     candidate = f"{stem}_v{n:02d}{ext}"
-    if not (out_target_dir / candidate).exists():
+    if not (dest_dir / candidate).exists():
       return candidate
     n += 1
 
 def plan_destination(
-  out_target_dir: Path,
+  dest_dir: Path,
   src_name: str,
   src_hash: str,
   existing_hash_to_path: Dict[str, Path],
 ) -> Tuple[Optional[Path], str, bool, bool]:
   """
-  Decide destination inside out_target_dir.
+  Decide destination inside dest_dir.
   Returns: (dest_path_or_None, action, name_conflict, content_duplicate)
            action ∈ {"COPY", "COPY_RENAMED", "SKIP_DUPLICATE"}
   """
@@ -106,11 +107,11 @@ def plan_destination(
 
   src_path = Path(src_name)
   stem, ext = src_path.stem, (src_path.suffix if src_path.suffix else ".flf")
-  candidate = out_target_dir / f"{stem}{ext}"
+  candidate = dest_dir / f"{stem}{ext}"
   if not candidate.exists():
     return candidate, "COPY", False, False
 
-  versioned = out_target_dir / next_versioned_name(out_target_dir, stem, ext)
+  versioned = dest_dir / next_versioned_name(dest_dir, stem, ext)
   return versioned, "COPY_RENAMED", True, False
 
 def write_jsonl(logfile: Path, record: dict) -> None:
@@ -138,20 +139,37 @@ def index_existing(out_dir: Path, progress: Progress, task: TaskID) -> Dict[str,
   return existing_hash_to_path
 
 def process_inputs(
+  in_dir: Path,
   in_files: List[Path],
   out_dir: Path,
   out_target_dir: Path,
+  maintain_structure_effective: bool,
   existing_hash_to_path: Dict[str, Path],
   logfile: Path,
   progress: Progress,
   task: TaskID,
 ) -> Tuple[int, int, int]:
+  """
+  Copy inputs into out_target_dir (or its subdirs if maintain_structure_effective).
+  Versioning happens within the final destination subdirectory.
+  """
   copied = 0
   renamed = 0
   skipped = 0
   progress.update(task, total=len(in_files))
 
   for src in in_files:
+    # Decide destination base directory
+    if maintain_structure_effective:
+      # Preserve the relative parent path under --in
+      try:
+        rel_parent = src.relative_to(in_dir).parent
+      except Exception:
+        rel_parent = Path(".")
+      dest_base_dir = (out_target_dir / rel_parent).resolve()
+    else:
+      dest_base_dir = out_target_dir
+
     # Hash input
     try:
       src_hash = xxhash_file(src)
@@ -168,7 +186,7 @@ def process_inputs(
       continue
 
     dest, action, name_conflict, content_duplicate = plan_destination(
-      out_target_dir, src.name, src_hash, existing_hash_to_path
+      dest_base_dir, src.name, src_hash, existing_hash_to_path
     )
 
     event = {
@@ -177,6 +195,8 @@ def process_inputs(
       "input_hash": f"xxh64:{src_hash}",
       "out_dir": str(out_dir),
       "out_target_dir": str(out_target_dir),
+      "dest_base_dir": str(dest_base_dir),
+      "maintain_structure_effective": maintain_structure_effective,
       "existing_same_name": name_conflict,
       "existing_same_content": content_duplicate,
       "action": action,
@@ -192,7 +212,7 @@ def process_inputs(
 
     assert dest is not None
     try:
-      out_target_dir.mkdir(parents=True, exist_ok=True)
+      dest_base_dir.mkdir(parents=True, exist_ok=True)
       shutil.copy2(src, dest)
       # Update maps so later inputs (this run) see this content as existing
       existing_hash_to_path[src_hash] = dest
@@ -201,15 +221,15 @@ def process_inputs(
 
       if action == "COPY":
         copied += 1
-        logger.info(f"[green]COPY[/]: {src.name} → {dest.name}")
+        logger.info(f"[green]COPY[/]: {src.name} → {dest.relative_to(out_dir)}")
       else:
         renamed += 1
-        logger.info(f"[cyan]RENAME+COPY[/]: {src.name} → {dest.name}")
+        logger.info(f"[cyan]RENAME+COPY[/]: {src.name} → {dest.relative_to(out_dir)}")
     except Exception as e:
       event["action"] = "ERROR_COPY"
       event["error"] = str(e)
       write_jsonl(logfile, event)
-      logger.info(f"[red]ERROR[/]: failed to copy {src.name} → {dest.name}: {e}")
+      logger.info(f"[red]ERROR[/]: failed to copy {src.name} → {dest}: {e}")
     finally:
       progress.advance(task, 1)
 
@@ -225,6 +245,8 @@ def main() -> None:
   parser.add_argument("--out", "-o", dest="out_dir", required=True, help="Output directory to populate with unique fonts.")
   parser.add_argument("-r", "--recursive", action="store_true", help="Scan input directory recursively.")
   parser.add_argument("--outsub", dest="out_sub", help="Subdirectory under --out to place files from this run (comparisons still index entire --out).")
+  parser.add_argument("--maintain-structure", action="store_true",
+                      help="When used with --outsub and --recursive, preserve the input's subdirectory structure under --out/<outsub>/")
   args = parser.parse_args()
 
   in_dir = Path(args.in_dir).expanduser().resolve()
@@ -238,16 +260,21 @@ def main() -> None:
     console.print("[red]ERROR[/] --in and --out must be different directories.")
     sys.exit(2)
 
+  out_dir.mkdir(parents=True, exist_ok=True)
+
   # Determine the target folder for this run
   out_target_dir = (out_dir / args.out_sub).resolve() if args.out_sub else out_dir
-  out_dir.mkdir(parents=True, exist_ok=True)
   out_target_dir.mkdir(parents=True, exist_ok=True)
+
+  # Effective maintain-structure only if both outsub and recursive are present
+  maintain_structure_effective = bool(args.out_sub and args.recursive and args.maintain_structure)
+  if args.maintain_structure and not maintain_structure_effective:
+    console.print("[yellow]NOTE[/] --maintain-structure requires both --outsub and --recursive; ignoring it for this run.")
 
   # Prevent accidental self-ingestion if --out is inside --in and --recursive is used
   try:
     exclude_subtree = out_dir if args.recursive and out_dir.is_relative_to(in_dir) else None
   except AttributeError:
-    # Fallback if is_relative_to isn't available
     exclude_subtree = out_dir if args.recursive and str(out_dir).startswith(str(in_dir)) else None
 
   timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -255,7 +282,8 @@ def main() -> None:
 
   logger.info(
     f"Starting import  •  in=[bold]{in_dir}[/]  out=[bold]{out_dir}[/]  "
-    f"outsub=[bold]{args.out_sub or '(none)'}[/]  recursive=[bold]{args.recursive}[/]"
+    f"outsub=[bold]{args.out_sub or '(none)'}[/]  recursive=[bold]{args.recursive}[/]  "
+    f"maintain_structure=[bold]{maintain_structure_effective}[/]"
   )
   logger.info(f"JSONL log: [italic]{logfile}[/]")
 
@@ -281,7 +309,8 @@ def main() -> None:
 
     t_process = progress.add_task("Processing input fonts", total=0)
     copied, renamed, skipped = process_inputs(
-      in_files, out_dir, out_target_dir, existing_hash_to_path, logfile, progress, t_process
+      in_dir, in_files, out_dir, out_target_dir, maintain_structure_effective,
+      existing_hash_to_path, logfile, progress, t_process
     )
 
   # Summary
@@ -294,4 +323,3 @@ def main() -> None:
 
 if __name__ == "__main__":
   main()
-
