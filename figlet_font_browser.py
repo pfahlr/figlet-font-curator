@@ -193,6 +193,21 @@ class FontBrowserApp(App[None]):
   def _refresh_status(self) -> None:
     self.query_one("#status", Label).update(self._status_text())
 
+  def toast(self, message: str) -> None:
+    """Display a transient notification or fall back to the preview log."""
+    notify = getattr(self, "notify", None)
+    if callable(notify):
+      try:
+        notify(message, timeout=4)
+        return
+      except Exception:
+        pass
+    self._append_preview(message)
+    try:
+      self.console.log(message)
+    except Exception:
+      pass
+
   # ----- Actions -----
   def action_quit(self) -> None:
     self.exit()
@@ -445,7 +460,13 @@ def parse_args(argv: Optional[List[str]] = None) -> Config:
   p.add_argument("--font-dir", type=Path, default=Path.home() / "figlet-fonts", help="Base directory to scan recursively for fonts")
   p.add_argument("--text", required=True, help="Text to render in previews")
   p.add_argument("--width", type=int, default=os.get_terminal_size().columns if sys.stdout.isatty() else 80, help="Render width (columns)")
-  p.add_argument("--out-dir", type=Path, default=None, help="Directory to save outputs (used by 's'/'a' actions)")
+  default_out = Path.home() / "figlet-font-browser-output"
+  p.add_argument(
+    "--out-dir",
+    type=Path,
+    default=default_out,
+    help=f"Directory to save outputs (used by 's'/'a' actions) [default: {default_out}]",
+  )
   p.add_argument("--out-prefix", dest="out_prefix", default="", help="Filename prefix when saving outputs")
   p.add_argument("--use-toilet", action="store_true", help="Use 'toilet' for .tlf fonts if available")
   p.add_argument("--flc", type=Path, default=None, help="Path to .flc charmap to pass to figlet via -C")
