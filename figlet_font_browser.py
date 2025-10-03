@@ -29,11 +29,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import locale
-import os
 import hashlib
 import inspect
+import locale
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -251,6 +251,86 @@ def _normalise_figlet_output(s: str) -> str:
 
   # Convert CRLF/CR to LF so we only have to deal with a single newline form.
   s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+  def _repair_split_ansi_sequences(text: str) -> str:
+    """Remove stray newlines that split CSI/SGR escape sequences.
+
+    Some FIGlet ANSI art fonts include long colour sequences. Because the
+    classic figlet binary counts those bytes towards the wrap width, it can
+    inject a newline mid-escape (e.g. ``"\x1b[38;5;10\n2m"``), leaving the
+    control codes visible instead of updating the colour state. We stitch those
+    sequences back together by buffering escape runs and discarding newlines
+    encountered before the terminating byte (``@``-``~``). If the escape run is
+    reduced to a bare ``ESC`` we drop it entirely as it no longer represents a
+    valid control sequence.
+    """
+
+    if "\x1b" not in text or "\n" not in text:
+      return text
+
+    repaired: list[str] = []
+    escape_buffer: list[str] = []
+    in_escape = False
+
+    for ch in text:
+      if not in_escape:
+        if ch == "\x1b":
+          escape_buffer = [ch]
+          in_escape = True
+        else:
+          repaired.append(ch)
+        continue
+
+      # We are buffering an escape sequence.
+      if ch == "\n":
+        # If we only saw the initial ESC, drop it; otherwise ignore the newline.
+        if len(escape_buffer) == 1:
+          escape_buffer = []
+          in_escape = False
+        continue
+
+      if ch == "\x1b":
+        # A fresh escape started before the previous one terminated; discard the
+        # incomplete buffer and start over so we don't leak fragments like
+        # ``"\x1b[4"`` into the output.
+        escape_buffer = [ch]
+        continue
+
+      escape_buffer.append(ch)
+
+      # ESC sequences terminate once we hit a final byte in the 0x40–0x7E range.
+      if 0x40 <= ord(ch) <= 0x7E:
+        repaired.extend(escape_buffer)
+        escape_buffer = []
+        in_escape = False
+
+    if escape_buffer:
+      repaired.extend(escape_buffer)
+
+    stitched = "".join(repaired)
+
+    # FIGlet's wrapping can also leave the trailing digits of an SGR on the
+    # previous line and the opening bracket on the next, e.g. "\x1b[44;94\n47;90m".
+    # We patch those fragments up by closing the prior run with an 'm' and
+    # reintroducing the missing "ESC[" prefix on the next line when required.
+    partial_re = re.compile(r"\x1b\[[0-9;]*$")
+    leading_digits_re = re.compile(r"^([0-9;]+m)")
+
+    segments = stitched.split("\n")
+    for idx in range(len(segments) - 1):
+      seg = segments[idx]
+      match = partial_re.search(seg)
+      if match and not seg.endswith("m"):
+        segments[idx] = seg + "m"
+
+      nxt = segments[idx + 1]
+      lead = leading_digits_re.match(nxt)
+      if lead and not nxt.startswith("\x1b["):
+        segments[idx + 1] = "\x1b[" + nxt
+
+    return "\n".join(segments)
+
+  s = _repair_split_ansi_sequences(s)
 
   def _apply_backspaces(segment: str) -> str:
     buf: list[str] = []
