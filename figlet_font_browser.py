@@ -76,12 +76,16 @@ class FontEntry:
 
 def scan_fonts(base: Path) -> List[FontEntry]:
   fonts: List[FontEntry] = []
-  for p in base.rglob("*.flf"):
-    if p.is_file():
+
+  for p in base.rglob("*"):
+    if not p.is_file():
+      continue
+    suffix = p.suffix.lower()
+    if suffix == ".flf":
       fonts.append(FontEntry(p, "flf"))
-  for p in base.rglob("*.tlf"):
-    if p.is_file():
+    elif suffix == ".tlf":
       fonts.append(FontEntry(p, "tlf"))
+
   fonts.sort(key=lambda f: str(f.path).lower())
   return fonts
 
