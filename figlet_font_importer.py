@@ -1,77 +1,68 @@
 #!/usr/bin/env python3
 """
-figlet_font_importer.py
+figlet_font_importer_rich.py
 
-Copy .flf (FIGlet font) files from --in to --out with content-based de-duplication.
-- If an input file's content matches any .flf in --out (including ones copied earlier
-  in the same run), it is SKIPPED.
-- If a file name collides but contents differ, write with a versioned suffix:
-  name_v02.flf, name_v03.flf, ... (next available).
-- Logs every operation to a timestamped JSONL log file under --out and echoes a summary.
+Copy .flf (FIGlet font) files from --in to --out with content-based de-duplication,
+versioning on same-name/different-content (_v02, _v03, ...), progress bars (Rich),
+and JSONL operation logging.
 
 Usage:
-  python figlet_font_importer.py --in /path/to/in_fonts --out /path/to/out_fonts
+  python figlet_font_importer_rich.py --in /path/to/in_fonts --out /path/to/out_fonts
 """
 
 import argparse
-import hashlib
 import json
-import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
+
+# Third-party
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, TaskID
+import logging
+
+try:
+  import xxhash  # fast, non-crypto hash
+except ImportError as e:
+  print("Missing dependency 'xxhash'. Install with: pip install xxhash", file=sys.stderr)
+  raise
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 LOG_BASENAME_PREFIX = "figlet_import"
 
-def sha256_file(path: Path) -> str:
-  h = hashlib.sha256()
-  with path.open("rb") as f:
-    for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
-      h.update(chunk)
-  return h.hexdigest()
+console = Console()
+logger = logging.getLogger("figlet_importer")
 
-def iter_flf_files(directory: Path):
+def setup_logging() -> None:
+  logger.setLevel(logging.INFO)
+  logger.handlers.clear()
+  handler = RichHandler(console=console, show_time=False, show_level=False, rich_tracebacks=True)
+  logger.addHandler(handler)
+
+def now_iso() -> str:
+  return datetime.now(timezone.utc).astimezone().isoformat()
+
+def iter_flf_files(directory: Path) -> Iterable[Path]:
   # Only top-level .flf files (case-insensitive)
   for p in directory.iterdir():
     if p.is_file() and p.suffix.lower() == ".flf":
       yield p
 
-def prepare_logger(log_path: Path) -> logging.Logger:
-  logger = logging.getLogger("figlet_importer")
-  logger.setLevel(logging.INFO)
-  logger.handlers.clear()
-
-  # Console for human-readable progress
-  ch = logging.StreamHandler(sys.stdout)
-  ch.setLevel(logging.INFO)
-  ch.setFormatter(logging.Formatter("%(message)s"))
-  logger.addHandler(ch)
-
-  # File handler emits JSONL entries (we'll write JSON manually per event)
-  fh = logging.FileHandler(log_path, encoding="utf-8")
-  fh.setLevel(logging.INFO)
-  fh.setFormatter(logging.Formatter("%(message)s"))
-  logger.addHandler(fh)
-
-  return logger
-
-def jsonl_log(file_handle: logging.FileHandler, record: dict):
-  # Route JSONL only to the file handler; the main logger writes strings to both.
-  # We'll emit the JSON string via the logger but tag lines to filter where needed.
-  logging.getLogger("figlet_importer").info(json.dumps(record, ensure_ascii=False))
-
-def now_iso() -> str:
-  return datetime.now(timezone.utc).astimezone().isoformat()
+def xxhash_file(path: Path) -> str:
+  h = xxhash.xxh64()
+  with path.open("rb") as f:
+    while True:
+      chunk = f.read(CHUNK_SIZE)
+      if not chunk:
+        break
+      h.update(chunk)
+  return h.hexdigest()
 
 def next_versioned_name(out_dir: Path, stem: str, ext: str) -> str:
-  """
-  Returns the next available versioned filename like stem_v02.ext, stem_v03.ext, ...
-  Assumes stem.ext is already taken.
-  """
   n = 2
   while True:
     candidate = f"{stem}_v{n:02d}{ext}"
@@ -86,84 +77,60 @@ def plan_destination(
   existing_hash_to_path: Dict[str, Path],
 ) -> Tuple[Optional[Path], str, bool, bool]:
   """
-  Decide where (and whether) to copy the file.
-
   Returns:
     (dest_path_or_None, action, name_conflict, content_duplicate)
-    - action in {"COPY", "COPY_RENAMED", "SKIP_DUPLICATE"}
+    action in {"COPY", "COPY_RENAMED", "SKIP_DUPLICATE"}
   """
-  # Duplicate by content?
   if src_hash in existing_hash_to_path:
     return None, "SKIP_DUPLICATE", False, True
 
-  # Not a content duplicate. Check for name collision.
   src_path = Path(src_name)
-  stem, ext = src_path.stem, src_path.suffix
-  if not ext:
-    ext = ".flf"  # be defensive; but .flf should exist
-
+  stem, ext = src_path.stem, src_path.suffix or ".flf"
   candidate = out_dir / f"{stem}{ext}"
   if not candidate.exists():
     return candidate, "COPY", False, False
 
-  # Name exists but different content: version it.
   versioned = out_dir / next_versioned_name(out_dir, stem, ext)
   return versioned, "COPY_RENAMED", True, False
 
-def main():
-  parser = argparse.ArgumentParser(
-    description="Import FIGlet .flf fonts with content-based deduplication and versioned naming."
-  )
-  parser.add_argument("--in", "-i", dest="in_dir", required=True, help="Input directory containing .flf files.")
-  parser.add_argument("--out", "-o", dest="out_dir", required=True, help="Output directory to populate with unique .flf files.")
-  args = parser.parse_args()
+def write_jsonl(logfile: Path, record: dict) -> None:
+  logfile.parent.mkdir(parents=True, exist_ok=True)
+  with logfile.open("a", encoding="utf-8") as f:
+    f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-  in_dir = Path(args.in_dir).expanduser().resolve()
-  out_dir = Path(args.out_dir).expanduser().resolve()
-
-  if not in_dir.is_dir():
-    print(f"ERROR: --in directory does not exist or is not a directory: {in_dir}", file=sys.stderr)
-    sys.exit(2)
-
-  if in_dir == out_dir:
-    print("ERROR: --in and --out must be different directories.", file=sys.stderr)
-    sys.exit(2)
-
-  out_dir.mkdir(parents=True, exist_ok=True)
-
-  # Prepare logger and JSONL log file
-  timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-  log_path = out_dir / f"{LOG_BASENAME_PREFIX}_{timestamp}.log.jsonl"
-  logger = prepare_logger(log_path)
-
-  logger.info(f"Starting import  •  in={in_dir}  out={out_dir}")
-  logger.info(f"Log file: {log_path}")
-
-  # Index existing out_dir .flf files by content hash
+def index_existing(out_dir: Path, progress: Progress, task: TaskID) -> Dict[str, Path]:
   existing_hash_to_path: Dict[str, Path] = {}
-  existing_count = 0
-  for existing in iter_flf_files(out_dir):
+  existing_files = list(iter_flf_files(out_dir))
+  progress.update(task, total=len(existing_files))
+
+  for p in existing_files:
     try:
-      h = sha256_file(existing)
-      # If collisions in out_dir (same content multiple files), first one wins; that's fine for our purposes.
-      existing_hash_to_path.setdefault(h, existing)
-      existing_count += 1
+      h = xxhash_file(p)
+      existing_hash_to_path.setdefault(h, p)
     except Exception as e:
-      logger.info(f"WARNING: Failed to hash existing file: {existing} ({e})")
+      logger.info(f"[yellow]WARN[/]: failed to hash existing: {p.name} ({e})")
+    finally:
+      progress.advance(task, 1)
 
-  logger.info(f"Found {existing_count} existing .flf in output.")
+  return existing_hash_to_path
 
-  # Gather input files
-  in_files = list(iter_flf_files(in_dir))
-  logger.info(f"Found {len(in_files)} input .flf files.")
-
+def process_inputs(
+  in_files: List[Path],
+  out_dir: Path,
+  existing_hash_to_path: Dict[str, Path],
+  logfile: Path,
+  progress: Progress,
+  task: TaskID,
+) -> Tuple[int, int, int]:
   copied = 0
   renamed = 0
-  skipped_dups = 0
+  skipped = 0
+  progress.update(task, total=len(in_files))
 
-  for src in sorted(in_files, key=lambda p: p.name.lower()):
+  for src in in_files:
+    # Hash input
     try:
-      src_hash = sha256_file(src)
+      src_hash = xxhash_file(src)
     except Exception as e:
       event = {
         "ts": now_iso(),
@@ -171,8 +138,9 @@ def main():
         "action": "ERROR_HASH",
         "error": str(e),
       }
-      jsonl_log(None, event)
-      logger.info(f"ERROR: Cannot hash {src.name}: {e}")
+      write_jsonl(logfile, event)
+      logger.info(f"[red]ERROR[/]: cannot hash {src.name}: {e}")
+      progress.advance(task, 1)
       continue
 
     dest, action, name_conflict, content_duplicate = plan_destination(
@@ -182,7 +150,7 @@ def main():
     event = {
       "ts": now_iso(),
       "input": str(src),
-      "input_hash": f"sha256:{src_hash}",
+      "input_hash": f"xxh64:{src_hash}",
       "out_dir": str(out_dir),
       "existing_same_name": name_conflict,
       "existing_same_content": content_duplicate,
@@ -190,38 +158,93 @@ def main():
     }
 
     if action == "SKIP_DUPLICATE":
-      skipped_dups += 1
+      skipped += 1
       event["reason"] = "duplicate-content"
-      jsonl_log(None, event)
-      logger.info(f"SKIP (dup): {src.name}")
+      write_jsonl(logfile, event)
+      logger.info(f"[yellow]SKIP (dup)[/]: {src.name}")
+      progress.advance(task, 1)
       continue
 
-    # COPY or COPY_RENAMED
     assert dest is not None
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
     try:
       shutil.copy2(src, dest)
+      # Update maps so later inputs see this content as existing
       existing_hash_to_path[src_hash] = dest
       event["dest"] = str(dest)
-      jsonl_log(None, event)
+      write_jsonl(logfile, event)
 
       if action == "COPY":
         copied += 1
-        logger.info(f"COPY: {src.name} -> {dest.name}")
+        logger.info(f"[green]COPY[/]: {src.name} → {dest.name}")
       else:
         renamed += 1
-        logger.info(f"RENAME+COPY: {src.name} -> {dest.name}")
-
+        logger.info(f"[cyan]RENAME+COPY[/]: {src.name} → {dest.name}")
     except Exception as e:
       event["action"] = "ERROR_COPY"
       event["error"] = str(e)
-      jsonl_log(None, event)
-      logger.info(f"ERROR: Failed to copy {src.name} -> {dest.name}: {e}")
+      write_jsonl(logfile, event)
+      logger.info(f"[red]ERROR[/]: failed to copy {src.name} → {dest.name}: {e}")
+    finally:
+      progress.advance(task, 1)
+
+  return copied, renamed, skipped
+
+def main() -> None:
+  setup_logging()
+
+  parser = argparse.ArgumentParser(
+    description="Import FIGlet .flf fonts with content-based deduplication, versioned naming, Rich progress, and JSONL logs."
+  )
+  parser.add_argument("--in", "-i", dest="in_dir", required=True, help="Input directory containing .flf files.")
+  parser.add_argument("--out", "-o", dest="out_dir", required=True, help="Output directory to populate with unique .flf files.")
+  args = parser.parse_args()
+
+  in_dir = Path(args.in_dir).expanduser().resolve()
+  out_dir = Path(args.out_dir).expanduser().resolve()
+
+  if not in_dir.is_dir():
+    console.print(f"[red]ERROR[/] --in directory does not exist or is not a directory: {in_dir}")
+    sys.exit(2)
+
+  if in_dir == out_dir:
+    console.print("[red]ERROR[/] --in and --out must be different directories.")
+    sys.exit(2)
+
+  out_dir.mkdir(parents=True, exist_ok=True)
+
+  timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+  logfile = out_dir / f"{LOG_BASENAME_PREFIX}_{timestamp}.log.jsonl"
+
+  logger.info(f"Starting import  •  in=[bold]{in_dir}[/]  out=[bold]{out_dir}[/]")
+  logger.info(f"JSONL log: [italic]{logfile}[/]")
+
+  in_files = sorted(list(iter_flf_files(in_dir)), key=lambda p: p.name.lower())
+
+  with Progress(
+    SpinnerColumn(),
+    TextColumn("[progress.description]{task.description}"),
+    BarColumn(),
+    TextColumn("{task.completed}/{task.total}"),
+    TimeElapsedColumn(),
+    TextColumn("•"),
+    TimeRemainingColumn(),
+    console=console,
+    transient=False,
+  ) as progress:
+    t_index = progress.add_task("Indexing existing output fonts", total=0)
+    existing_hash_to_path = index_existing(out_dir, progress, t_index)
+
+    t_process = progress.add_task("Processing input fonts", total=0)
+    copied, renamed, skipped = process_inputs(
+      in_files, out_dir, existing_hash_to_path, logfile, progress, t_process
+    )
 
   # Summary
-  logger.info("—" * 50)
-  logger.info(f"Summary: copied={copied}, renamed={renamed}, skipped_duplicates={skipped_dups}")
+  console.rule("Summary")
+  console.print(
+    f"[green]copied={copied}[/], [cyan]renamed={renamed}[/], [yellow]skipped_duplicates={skipped}[/]"
+  )
+  console.print(f"Log file: [italic]{logfile}[/]")
   logger.info("Done.")
 
 if __name__ == "__main__":
