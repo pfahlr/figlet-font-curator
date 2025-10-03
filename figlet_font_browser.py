@@ -40,6 +40,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Log
+from rich.text import Text
 
 FIGLET_DEFAULT = shutil.which("figlet") or "/usr/bin/figlet"
 TOILET_DEFAULT = shutil.which("toilet") or "/usr/bin/toilet"
@@ -353,13 +354,20 @@ class FontBrowserApp(App[None]):
       return
     self.preview.clear()
     if msg:
-      self.preview.write_line(msg)
+      self.preview.write_line(msg, markup=False, highlight=False)
 
-  def _append_preview(self, s: str) -> None:
+  def _append_preview(self, s: str, *, interpret_ansi: bool = False) -> None:
     if self.preview is None:
       return
+    if interpret_ansi:
+      text = Text.from_ansi(s, strip=False)
+      self.preview.write(text)
+      if not s.endswith("\n"):
+        self.preview.write("\n", markup=False, highlight=False)
+      return
+
     for line in s.splitlines():
-      self.preview.write_line(line)
+      self.preview.write_line(line, markup=False, highlight=False)
 
   def _next_output_path(
     self,
@@ -421,7 +429,7 @@ class FontBrowserApp(App[None]):
       header = f"{'='*78}\n{fe.path}\n{'-'*78}\n"
       self._append_preview(header)
       if code == 0:
-        self._append_preview(out)
+        self._append_preview(out, interpret_ansi=True)
         body = out
       else:
         err_text = "[ERROR]\n" + out + "\n" + err
