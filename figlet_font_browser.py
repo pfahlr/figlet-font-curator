@@ -205,7 +205,7 @@ class FontBrowserApp(App[None]):
     if not self.config.out_dir:
       self.bell(); self.toast("No --out-dir provided."); return
     cur = self._current_font()
-    if not cur or not self.preview:
+    if not cur or self.preview is None:
       return
     out = self._next_output_path()
     out.write_text(self.last_render or "")
@@ -310,7 +310,7 @@ class FontBrowserApp(App[None]):
     self._rebuild_list()
 
   def _rebuild_list(self) -> None:
-    if not self.font_list:
+    if self.font_list is None:
       return
     prev_index = self.font_list.index or 0
     self.font_list.clear()
@@ -333,7 +333,7 @@ class FontBrowserApp(App[None]):
     self._refresh_status()
 
   def _current_font(self) -> Optional[FontEntry]:
-    if not self.filtered_fonts or not self.font_list:
+    if not self.filtered_fonts or self.font_list is None:
       return None
     idx = self.font_list.index or 0
     if 0 <= idx < len(self.filtered_fonts):
@@ -341,14 +341,14 @@ class FontBrowserApp(App[None]):
     return None
 
   def _clear_preview(self, msg: str = "") -> None:
-    if not self.preview:
+    if self.preview is None:
       return
     self.preview.clear()
     if msg:
       self.preview.write_line(msg)
 
   def _append_preview(self, s: str) -> None:
-    if not self.preview:
+    if self.preview is None:
       return
     for line in s.splitlines():
       self.preview.write_line(line)
